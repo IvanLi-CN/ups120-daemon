@@ -1,6 +1,15 @@
-use binrw::{BinRead, BinResult, BinWrite, io::{Read, Seek, Write}};
-use super::data_models::{AllMeasurements, Bq25730Measurements, Bq76920Measurements, Temperatures};
-use super::usb_types::{AdcMeasurementsRaw, CellVoltagesRaw, CoulombCounterRaw};
+use binrw::{BinRead, BinResult, BinWrite, io::{Read, Seek, Write}, Endian};
+use super::data_models::{AllMeasurements, Bq25730Measurements, Bq76920Measurements, Temperatures, SystemStatus, MosStatus};
+use bq25730_async_rs::data_types::{AdcPsys, AdcVbus, AdcIdchg, AdcIchg, AdcCmpin, AdcIin, AdcVbat, AdcVsys};
+use uom::si::{
+    electric_current::milliampere,
+    electrical_resistance::milliohm,
+    electric_potential::millivolt, // 导入 millivolt
+    thermodynamic_temperature::kelvin, // 导入 kelvin
+};
+
+const CC_LSB_UVS: f32 = 8.44; // µV/s
+const SENSE_RESISTOR_MILLIOHM: f32 = 3.0; // 3.0 mOhm
 
 // Manual implementation of BinRead and BinWrite for AllMeasurements
 impl<const N: usize> BinRead for AllMeasurements<N> {
@@ -11,50 +20,84 @@ impl<const N: usize> BinRead for AllMeasurements<N> {
         endian: binrw::Endian,
         args: Self::Args<'_>,
     ) -> BinResult<Self> {
-        let bq25730_psys_raw = u8::read_options(reader, endian, args)?;
-        let bq25730_vbus_raw = u8::read_options(reader, endian, args)?;
-        let bq25730_idchg_raw = u8::read_options(reader, endian, args)?;
-        let bq25730_ichg_raw = u8::read_options(reader, endian, args)?;
-        let bq25730_cmpin_raw = u8::read_options(reader, endian, args)?;
-        let bq25730_iin_raw = u8::read_options(reader, endian, args)?;
-        let bq25730_vbat_raw = u8::read_options(reader, endian, args)?;
-        let bq25730_vsys_raw = u8::read_options(reader, endian, args)?;
+        // BQ25730 Measurements (u8)
+        let bq25730_psys_raw = u8::read_options(reader, Endian::Big, args)?;
+        let bq25730_vbus_raw = u8::read_options(reader, Endian::Big, args)?;
+        let bq25730_idchg_raw = u8::read_options(reader, Endian::Big, args)?;
+        let bq25730_ichg_raw = u8::read_options(reader, Endian::Big, args)?;
+        let bq25730_cmpin_raw = u8::read_options(reader, Endian::Big, args)?;
+        let bq25730_iin_raw = u8::read_options(reader, Endian::Big, args)?;
+        let bq25730_vbat_raw = u8::read_options(reader, Endian::Big, args)?;
+        let bq25730_vsys_raw = u8::read_options(reader, Endian::Big, args)?;
 
-        let mut cell_voltages_raw = [0.0f32; N]; // 原始数据仍然是 f32
+        // Cell Voltages (f32)
+        let mut cell_voltages_raw = [0.0f32; N];
         for i in 0..N {
-            cell_voltages_raw[i] = f32::read_options(reader, endian, args)?;
+            cell_voltages_raw[i] = f32::read_options(reader, Endian::Big, args)?;
         }
 
-        let temperatures_ts1_raw = f32::read_options(reader, endian, args)?; // 原始数据仍然是 f32
-        let temperatures_is_thermistor_raw = u8::read_options(reader, endian, args)?;
+        // Temperatures (f32 for ts1, u8 for is_thermistor)
+        let temperatures_ts1_raw = f32::read_options(reader, Endian::Big, args)?;
+        let temperatures_is_thermistor_raw = u8::read_options(reader, Endian::Big, args)?;
         let temperatures_is_thermistor = temperatures_is_thermistor_raw != 0;
 
-        let coulomb_counter_raw_cc = i16::read_options(reader, endian, args)?;
+        // Current (f32)
+        let current_raw = f32::read_options(reader, Endian::Big, args)?;
+
+        // System Status (u8 for each boolean flag)
+        let system_status_cc_ready_raw = u8::read_options(reader, Endian::Big, args)?;
+        let system_status_ovr_temp_raw = u8::read_options(reader, Endian::Big, args)?;
+        let system_status_uv_raw = u8::read_options(reader, Endian::Big, args)?;
+        let system_status_ov_raw = u8::read_options(reader, Endian::Big, args)?;
+        let system_status_scd_raw = u8::read_options(reader, Endian::Big, args)?;
+        let system_status_ocd_raw = u8::read_options(reader, Endian::Big, args)?;
+        let system_status_cuv_raw = u8::read_options(reader, Endian::Big, args)?;
+        let system_status_cov_raw = u8::read_options(reader, Endian::Big, args)?;
+
+        // Mos Status (u8 for each boolean flag)
+        let mos_status_charge_on_raw = u8::read_options(reader, Endian::Big, args)?;
+        let mos_status_discharge_on_raw = u8::read_options(reader, Endian::Big, args)?;
 
         Ok(Self {
             bq25730: Bq25730Measurements {
-                psys: bq25730_psys_raw as f32, // 假设需要转换为 f32
-                vbus: bq25730_vbus_raw as f32,
-                idchg: bq25730_idchg_raw as f32,
-                ichg: bq25730_ichg_raw as f32,
-                cmpin: bq25730_cmpin_raw as f32,
-                iin: bq25730_iin_raw as f32, // 修复拼写错误
-                vbat: bq25730_vbat_raw as f32,
-                vsys: bq25730_vsys_raw as f32,
+                psys: AdcPsys::from_register_value(bq25730_psys_raw as u8).0 as f32, // 强制转换为 u8
+                vbus: AdcVbus::from_register_value(bq25730_vbus_raw as u8).0 as f32,
+                idchg: AdcIdchg::from_register_value(bq25730_idchg_raw as u8).0 as f32,
+                ichg: AdcIchg::from_register_value(bq25730_ichg_raw as u8).0 as f32,
+                cmpin: AdcCmpin::from_register_value(bq25730_cmpin_raw as u8).0 as f32,
+                iin: AdcIin::from_register_value(bq25730_iin_raw as u8).0 as f32,
+                vbat: AdcVbat::from_register_value(bq25730_vbat_raw as u8).0 as f32,
+                vsys: AdcVsys::from_register_value(bq25730_vsys_raw as u8).0 as f32,
             },
             bq76920: Bq76920Measurements {
                 cell_voltages: {
-                    let mut voltages = [0.0f32; N]; // 修正为原始类型
+                    let mut voltages = [0.0f32; N];
                     for i in 0..N {
-                        voltages[i] = cell_voltages_raw[i]; // 直接赋值
+                        voltages[i] = cell_voltages_raw[i];
                     }
                     voltages
                 },
                 temperatures: Temperatures {
-                    ts1: temperatures_ts1_raw, // 修正为原始类型
+                    ts1: temperatures_ts1_raw - 273.15, // 将开尔文转换为摄氏度
                     is_thermistor: temperatures_is_thermistor,
                 },
-                coulomb_counter: coulomb_counter_raw_cc,
+                coulomb_counter: current_raw, // 直接使用 f32
+                system_status: SystemStatus::from_bits_truncate(
+                    (system_status_cc_ready_raw << 7)
+                        | (system_status_ovr_temp_raw << 6)
+                        | (system_status_uv_raw << 5)
+                        | (system_status_ov_raw << 4)
+                        | (system_status_scd_raw << 3)
+                        | (system_status_ocd_raw << 2)
+                        | (system_status_cuv_raw << 1)
+                        | system_status_cov_raw,
+                ),
+                mos_status: match (mos_status_charge_on_raw != 0, mos_status_discharge_on_raw != 0) {
+                    (false, false) => MosStatus::BothOff,
+                    (true, false) => MosStatus::ChargeOn,
+                    (false, true) => MosStatus::DischargeOn,
+                    (true, true) => MosStatus::BothOn,
+                },
             },
         })
     }
@@ -69,28 +112,39 @@ impl<const N: usize> BinWrite for AllMeasurements<N> {
         endian: binrw::Endian,
         args: Self::Args<'_>,
     ) -> BinResult<()> {
-        (self.bq25730.psys as u8).write_options(writer, endian, args)?;
-        (self.bq25730.vbus as u8).write_options(writer, endian, args)?;
-        (self.bq25730.idchg as u8).write_options(writer, endian, args)?;
-        (self.bq25730.ichg as u8).write_options(writer, endian, args)?;
-        (self.bq25730.cmpin as u8).write_options(writer, endian, args)?;
-        (self.bq25730.iin as u8).write_options(writer, endian, args)?;
-        (self.bq25730.vbat as u8).write_options(writer, endian, args)?;
-        (self.bq25730.vsys as u8).write_options(writer, endian, args)?;
+        // BQ25730 Measurements (u16)
+        ((self.bq25730.psys / AdcPsys::LSB_MW as f32) as u8).write_options(writer, Endian::Big, args)?;
+        ((self.bq25730.vbus / AdcVbus::LSB_MV as f32) as u8).write_options(writer, Endian::Big, args)?;
+        ((self.bq25730.idchg / AdcIdchg::LSB_MA as f32) as u8).write_options(writer, Endian::Big, args)?;
+        ((self.bq25730.ichg / AdcIchg::LSB_MA as f32) as u8).write_options(writer, Endian::Big, args)?;
+        ((self.bq25730.cmpin / AdcCmpin::LSB_MV as f32) as u8).write_options(writer, Endian::Big, args)?;
+        ((self.bq25730.iin / AdcIin::LSB_MA as f32) as u8).write_options(writer, Endian::Big, args)?;
+        ((self.bq25730.vbat / AdcVbat::LSB_MV as f32) as u8).write_options(writer, Endian::Big, args)?;
+        ((self.bq25730.vsys / AdcVsys::LSB_MV as f32) as u8).write_options(writer, Endian::Big, args)?;
 
+        // Cell Voltages (f32)
         for i in 0..N {
-            self.bq76920.cell_voltages[i].write_options(writer, endian, args)?; // 直接写入
+            self.bq76920.cell_voltages[i].write_options(writer, Endian::Big, args)?;
         }
 
-        self.bq76920
-            .temperatures
-            .ts1
-            .write_options(writer, endian, args)?; // 直接写入
-        (self.bq76920.temperatures.is_thermistor as u8).write_options(writer, endian, args)?;
+        // Temperatures (f32 for ts1, u8 for is_thermistor)
+        self.bq76920.temperatures.ts1.write_options(writer, Endian::Big, args)?;
+        (self.bq76920.temperatures.is_thermistor as u8).write_options(writer, Endian::Big, args)?;
 
-        self.bq76920
-            .coulomb_counter
-            .write_options(writer, endian, args)?;
+        // Current (f32)
+        self.bq76920.coulomb_counter.write_options(writer, Endian::Big, args)?;
+
+        // System Status (u8 for each boolean flag)
+        (self.bq76920.system_status.bits() as u8).write_options(writer, Endian::Big, args)?; // 写入 SystemStatus 的原始 bits
+
+        // Mos Status (u8 for each boolean flag)
+        (match self.bq76920.mos_status { // 写入 MosStatus
+            MosStatus::BothOff => 0u8,
+            MosStatus::ChargeOn => 1u8,
+            MosStatus::DischargeOn => 2u8,
+            MosStatus::BothOn => 3u8,
+            MosStatus::Unknown => 4u8, // 添加 Unknown 变体
+        }).write_options(writer, Endian::Big, args)?;
 
         Ok(())
     }

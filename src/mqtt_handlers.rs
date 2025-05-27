@@ -59,6 +59,7 @@ pub async fn publish_measurements(
     measurements: AllMeasurements<5>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let payload = serde_json::to_string(&measurements)?;
+    info!("准备发布 MQTT 消息到主题 '{}'，内容: {}", topic, payload); // 添加日志
     client
         .publish(topic, QoS::AtLeastOnce, false, payload)
         .await?;

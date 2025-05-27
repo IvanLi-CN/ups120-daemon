@@ -110,6 +110,11 @@ pub async fn usb_manager_task(
             tokio::select! {
                 cmd = cmd_rx.recv() => {
                     match cmd {
+                        Some(UsbCommand::Subscribe) => {
+                            info!("USB 管理任务收到订阅命令。尝试重新连接并订阅...");
+                            // 退出内部循环，外部循环会处理重新连接和订阅
+                            break;
+                        }
                         Some(UsbCommand::Unsubscribe) => {
                             info!("USB 管理任务收到取消订阅命令。");
                             // 重新查找并打开设备以发送取消订阅命令
@@ -168,6 +173,7 @@ pub async fn usb_manager_task(
                             debug!("成功从 USB IN 端点 {:#02x} 读取到 {} 字节数据。", push_ep_address, n); // 修复拼写错误
                             let measurements_result = {
                                 let locked_buf = read_buffer_arc.lock().unwrap(); // 在这里锁定 buf
+                                log::info!("上位机接收原始字节: {:x?}", &locked_buf[..n]); // 添加日志
                                 let mut reader = Cursor::new(&locked_buf[..n]);
                                 UsbData::read_be(&mut reader)
                             }; // 锁在这里释放
