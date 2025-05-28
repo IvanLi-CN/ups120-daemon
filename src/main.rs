@@ -3,9 +3,7 @@ use std::time::Duration;
 use dotenv::dotenv;
 use env_logger::{Builder, Target};
 use log::{error, info};
-use tokio::{select, signal, time, spawn}; // 调整顺序，并保留实际使用的
 use tokio::sync::mpsc;
-use rusb::UsbContext;
 
 use ups120_daemon::{usb_types::*, usb_handlers::*, mqtt_handlers::*};
 

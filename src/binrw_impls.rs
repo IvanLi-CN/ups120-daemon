@@ -1,15 +1,7 @@
 use binrw::{BinRead, BinResult, BinWrite, io::{Read, Seek, Write}, Endian};
 use super::data_models::{AllMeasurements, Bq25730Measurements, Bq76920Measurements, Temperatures, SystemStatus, MosStatus};
 use bq25730_async_rs::data_types::{AdcPsys, AdcVbus, AdcIdchg, AdcIchg, AdcCmpin, AdcIin, AdcVbat, AdcVsys};
-use uom::si::{
-    electric_current::milliampere,
-    electrical_resistance::milliohm,
-    electric_potential::millivolt, // 导入 millivolt
-    thermodynamic_temperature::kelvin, // 导入 kelvin
-};
 
-const CC_LSB_UVS: f32 = 8.44; // µV/s
-const SENSE_RESISTOR_MILLIOHM: f32 = 3.0; // 3.0 mOhm
 
 // Manual implementation of BinRead and BinWrite for AllMeasurements
 impl<const N: usize> BinRead for AllMeasurements<N> {
@@ -17,7 +9,7 @@ impl<const N: usize> BinRead for AllMeasurements<N> {
 
     fn read_options<R: Read + Seek>(
         reader: &mut R,
-        endian: binrw::Endian,
+        _endian: binrw::Endian,
         args: Self::Args<'_>,
     ) -> BinResult<Self> {
         // BQ25730 Measurements (u8)
@@ -66,8 +58,8 @@ impl<const N: usize> BinRead for AllMeasurements<N> {
                 ichg: AdcIchg::from_register_value(bq25730_ichg_raw as u8).0 as f32,
                 cmpin: AdcCmpin::from_register_value(bq25730_cmpin_raw as u8).0 as f32,
                 iin: AdcIin::from_register_value(bq25730_iin_raw as u8).0 as f32,
-                vbat: AdcVbat::from_register_value(bq25730_vbat_raw as u8).0 as f32,
-                vsys: AdcVsys::from_register_value(bq25730_vsys_raw as u8).0 as f32,
+                vbat: AdcVbat::from_register_value(bq25730_vbat_raw as u8, 2880).0 as f32,
+                vsys: AdcVsys::from_register_value(bq25730_vsys_raw as u8, 2880).0 as f32,
             },
             bq76920: Bq76920Measurements {
                 cell_voltages: {
@@ -109,11 +101,11 @@ impl<const N: usize> BinWrite for AllMeasurements<N> {
     fn write_options<W: Write + Seek>(
         &self,
         writer: &mut W,
-        endian: binrw::Endian,
+        _endian: binrw::Endian,
         args: Self::Args<'_>,
     ) -> BinResult<()> {
         // BQ25730 Measurements (u16)
-        ((self.bq25730.psys / AdcPsys::LSB_MW as f32) as u8).write_options(writer, Endian::Big, args)?;
+        ((self.bq25730.psys / AdcPsys::LSB_MV as f32) as u8).write_options(writer, Endian::Big, args)?;
         ((self.bq25730.vbus / AdcVbus::LSB_MV as f32) as u8).write_options(writer, Endian::Big, args)?;
         ((self.bq25730.idchg / AdcIdchg::LSB_MA as f32) as u8).write_options(writer, Endian::Big, args)?;
         ((self.bq25730.ichg / AdcIchg::LSB_MA as f32) as u8).write_options(writer, Endian::Big, args)?;

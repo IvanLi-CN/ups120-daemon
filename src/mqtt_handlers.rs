@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use log::{debug, error, info};
 use rumqttc::{AsyncClient, Event, MqttOptions, QoS, Transport};
-use serde_json;
 
 use crate::data_models::AllMeasurements;
 
@@ -55,14 +54,31 @@ pub async fn connect_mqtt_and_publish(
 
 pub async fn publish_measurements(
     client: &AsyncClient,
-    topic: &str,
+    topic_prefix: &str,
     measurements: AllMeasurements<5>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let payload = serde_json::to_string(&measurements)?;
-    info!("准备发布 MQTT 消息到主题 '{}'，内容: {}", topic, payload); // 添加日志
-    client
-        .publish(topic, QoS::AtLeastOnce, false, payload)
-        .await?;
-    info!("已发布 MQTT 消息到主题 '{}'", topic);
+    // 发布 BQ25730 测量数据
+    let bq25730 = &measurements.bq25730;
+    client.publish(format!("{}/bq25730/psys", topic_prefix), QoS::AtLeastOnce, false, bq25730.psys.to_string()).await?;
+    client.publish(format!("{}/bq25730/vbus", topic_prefix), QoS::AtLeastOnce, false, bq25730.vbus.to_string()).await?;
+    client.publish(format!("{}/bq25730/idchg", topic_prefix), QoS::AtLeastOnce, false, bq25730.idchg.to_string()).await?;
+    client.publish(format!("{}/bq25730/ichg", topic_prefix), QoS::AtLeastOnce, false, bq25730.ichg.to_string()).await?;
+    client.publish(format!("{}/bq25730/cmpin", topic_prefix), QoS::AtLeastOnce, false, bq25730.cmpin.to_string()).await?;
+    client.publish(format!("{}/bq25730/iin", topic_prefix), QoS::AtLeastOnce, false, bq25730.iin.to_string()).await?;
+    client.publish(format!("{}/bq25730/vbat", topic_prefix), QoS::AtLeastOnce, false, bq25730.vbat.to_string()).await?;
+    client.publish(format!("{}/bq25730/vsys", topic_prefix), QoS::AtLeastOnce, false, bq25730.vsys.to_string()).await?;
+
+    // 发布 BQ76920 测量数据
+    let bq76920 = &measurements.bq76920;
+    for (i, voltage) in bq76920.cell_voltages.iter().enumerate() {
+        client.publish(format!("{}/bq76920/cell_voltages/{}", topic_prefix, i), QoS::AtLeastOnce, false, voltage.to_string()).await?;
+    }
+    client.publish(format!("{}/bq76920/temperatures/ts1", topic_prefix), QoS::AtLeastOnce, false, bq76920.temperatures.ts1.to_string()).await?;
+    client.publish(format!("{}/bq76920/coulomb_counter", topic_prefix), QoS::AtLeastOnce, false, bq76920.coulomb_counter.to_string()).await?;
+    client.publish(format!("{}/bq76920/system_status", topic_prefix), QoS::AtLeastOnce, false, format!("{:?}", bq76920.system_status)).await?; // 使用 Debug 格式化
+    client.publish(format!("{}/bq76920/mos_status", topic_prefix), QoS::AtLeastOnce, false, format!("{:?}", bq76920.mos_status)).await?; // 使用 Debug 格式化
+
+    info!("已发布所有测量数据到主题前缀 '{}'", topic_prefix);
+
     Ok(())
 }

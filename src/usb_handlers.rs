@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use binrw::{
     BinRead, BinWrite,
-    io::{Read, Seek, Write},
 };
 use log::{debug, error, info, warn};
 use rusb::UsbContext;
@@ -12,7 +11,6 @@ use tokio::sync::mpsc;
 
 use super::usb_types::{UsbCommand, UsbEvent};
 use super::binrw_impls::UsbData;
-use super::data_models::AllMeasurements;
 
 // USB 连接和数据收发函数
 pub async fn connect_and_subscribe_usb(
