@@ -18,3 +18,4 @@ uom = { version = "0.37", default-features = false, features = ["si", "f32", "st
 futures = "0.3"
 tokio-util = { version = "0.7", features = ["io"] }
 bq25730-async-rs = { path = "device/bq25730" }
+bq769x0-async-rs = { path = "device/bq76920" } # Added dependency for bq76920
