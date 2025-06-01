@@ -7,8 +7,7 @@ use log::{debug, error, info, warn};
 use rusb::UsbContext;
 use tokio::sync::mpsc;
 
-use super::usb_types::{UsbCommand, UsbEvent, UsbError, UsbData as HostUsbData};
-use super::binrw_impls::UsbData;
+use super::usb_types::{UsbCommand, UsbEvent, UsbError, UsbData}; // Removed 'as HostUsbData' and the incorrect import below
 
 // USB 连接和数据收发函数
 pub async fn connect_and_subscribe_usb(
@@ -19,7 +18,7 @@ pub async fn connect_and_subscribe_usb(
     // Minor comment to force re-evaluation
     let mut cmd_buffer = [0u8; 64];
     let mut writer = Cursor::new(&mut cmd_buffer[..]);
-    HostUsbData::SubscribeStatus.write_be(&mut writer).map_err(|e| UsbError::BinrwError(e.to_string()))?;
+    UsbData::SubscribeStatus.write_be(&mut writer).map_err(|e| UsbError::BinrwError(e.to_string()))?;
     let cmd_len = writer.position() as usize;
 
     match handle.write_interrupt(
@@ -42,7 +41,7 @@ pub async fn connect_and_subscribe_usb(
         Ok(n) => {
             info!("从响应端点读取到 {} 字节。", n);
             log::debug!("上位机接收用于响应的原始字节: {:x?}", &resp_buf[..n]);
-            match UsbData::read_be(&mut Cursor::new(&resp_buf[..n])) { 
+            match UsbData::read_le(&mut Cursor::new(&resp_buf[..n])) {
                 Ok(UsbData::StatusResponse(_measurements)) => {
                     info!("成功收到 StatusResponse 确认。");
                 }
@@ -182,13 +181,16 @@ pub async fn usb_manager_task(
                             debug!("成功从 USB IN 端点 {:#02x} 读取到 {} 字节数据。", push_ep_address, n);
                             let measurements_result = {
                                 let locked_buf = read_buffer_arc.lock().unwrap();
-                                log::debug!("上位机接收推送原始字节: {:x?}", &locked_buf[..n]);
+                                // 日志点1: 提升日志级别并确保打印
+                                info!("[LOG POINT 1] 上位机接收推送原始字节 ({} bytes): {:x?}", n, &locked_buf[..n]);
                                 let mut reader = Cursor::new(&locked_buf[..n]);
-                                UsbData::read_be(&mut reader) 
+                                UsbData::read_le(&mut reader)
                             };
 
                             match measurements_result {
                                 Ok(UsbData::StatusPush(measurements)) => {
+                                    // 日志点2: 打印解析后的数据
+                                    info!("[LOG POINT 2] USB 数据解析成功: {:?}", measurements);
                                     if let Err(e) = event_tx.send(UsbEvent::Measurements(measurements)).await {
                                         error!("发送 USB 测量数据失败: {:?}", e);
                                     }
@@ -247,7 +249,7 @@ pub async fn find_and_open_usb_device(
 
     let device_rusb = device_found_rusb.ok_or(UsbError::DeviceNotFound)?;
 
-    let mut handle = device_rusb.open().map_err(|e| UsbError::OpenFailed(e.to_string()))?; // handle IS mut
+    let handle = device_rusb.open().map_err(|e| UsbError::OpenFailed(e.to_string()))?;
     info!("已打开 USB 设备句柄。");
 
     // 尝试重置设备，看是否有助于解决重连问题
@@ -308,8 +310,8 @@ pub async fn find_and_open_usb_device(
 
     let config_descriptor = device_rusb.active_config_descriptor().map_err(UsbError::from)?;
     let mut command_ep_address = 0u8;
-    let mut response_ep_address: Option<u8> = None;
-    let mut push_ep_address: Option<u8> = None;
+    let response_ep_address: Option<u8>;
+    let push_ep_address: Option<u8>;
     let mut in_interrupt_eps = Vec::new();
     
     let mut found_claimed_interface_descriptors = false; 
@@ -352,21 +354,31 @@ pub async fn find_and_open_usb_device(
 
     if !in_interrupt_eps.is_empty() {
         response_ep_address = Some(in_interrupt_eps[0]);
-        info!("USB 响应 IN 端点设置为: {:#02x}", in_interrupt_eps[0]);
+        info!("USB 响应 IN 端点设置为: {:#02x}", response_ep_address.unwrap());
         if in_interrupt_eps.len() > 1 {
             push_ep_address = Some(in_interrupt_eps[1]);
-            info!("USB 推送 IN 端点设置为: {:#02x}", in_interrupt_eps[1]);
+            info!("USB 推送 IN 端点设置为: {:#02x}", push_ep_address.unwrap());
         } else {
-            warn!("只找到一个 USB IN 中断端点 {:#02x}。将用作响应和推送端点。", in_interrupt_eps[0]);
-            push_ep_address = Some(in_interrupt_eps[0]);
+            warn!("只找到一个 USB IN 中断端点 {:#02x}。将用作响应和推送端点。", response_ep_address.unwrap());
+            push_ep_address = response_ep_address; // Assign directly
         }
     } else {
         error!("在接口 {} 上未能找到任何 USB IN 中断端点。", interface_number);
+        // To satisfy definite assignment for response_ep_address and push_ep_address before early return:
+        // This path returns Err, so their values won't be used in Ok.
+        // However, to avoid uninitialized variable errors if the compiler can't prove all paths,
+        // assign a dummy value or ensure all paths leading to Ok assign them.
+        // Since this path returns Err, we don't strictly need to assign them for the Ok case.
+        // The compiler should understand this. If not, we might need to restructure or use dummy None.
         return Err(UsbError::EndpointNotFound(format!("IN 端点未在接口 {} 上找到", interface_number)));
     }
     
+    // At this point, if we haven't returned Err, response_ep_address and push_ep_address must have been assigned.
+    // The check for .is_none() is somewhat redundant if the logic guarantees assignment or error.
+    // However, keeping it for safety or if logic changes.
     if response_ep_address.is_none() || push_ep_address.is_none() {
-        return Err(UsbError::EndpointNotFound("未能成功分配响应或推送IN端点".to_string()));
+        // This case should ideally not be reached if the above logic is sound and assigns in all success paths.
+        return Err(UsbError::EndpointNotFound("未能成功分配响应或推送IN端点 (逻辑意外)".to_string()));
     }
 
     Ok((Some(handle), command_ep_address, response_ep_address, push_ep_address))
@@ -379,7 +391,7 @@ pub async fn send_unsubscribe_command(
     info!("正在发送取消订阅命令...");
     let mut cmd_buffer = [0u8; 64];
     let mut writer = Cursor::new(&mut cmd_buffer[..]);
-    HostUsbData::UnsubscribeStatus.write_be(&mut writer).map_err(|e| UsbError::BinrwError(e.to_string()))?;
+    UsbData::UnsubscribeStatus.write_be(&mut writer).map_err(|e| UsbError::BinrwError(e.to_string()))?;
     let cmd_len = writer.position() as usize;
 
     match handle.write_interrupt(

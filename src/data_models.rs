@@ -27,7 +27,6 @@ bitflags! {
         const UV = 0b0000_1000;     // 欠压 (对应固件 Bit 3)
         const OVRD_ALERT = 0b0001_0000; // 覆盖警报 (对应固件 Bit 4)
         const DEVICE_XREADY = 0b0010_0000; // 设备就绪 (对应固件 Bit 5)
-        const OVR_TEMP = 0b0100_0000; // 过温 (对应固件 Bit 6)
         const CC_READY = 0b1000_0000; // 库仑计数器就绪 (对应固件 Bit 7)
     }
 }
@@ -65,7 +64,9 @@ pub struct Bq76920Measurements<const N: usize> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Temperatures {
     #[serde(serialize_with = "serialize_thermodynamic_temperature")]
-    pub ts1: f32, // 修正为原始类型
+    pub ts1: f32,
+    pub ts2: Option<f32>,
+    pub ts3: Option<f32>,
     pub is_thermistor: bool,
 }
 
@@ -120,29 +121,28 @@ bitflags! {
 bitflags! {
     #[derive(Serialize, Deserialize, Default)]
     #[serde(transparent)]
-    pub struct ProchotLsbFlags: u8 { // Corresponds to PROCHOT_STATUS_LSB (0x38)
-        const STAT_PTM          = 0b10000000; // PTM PROCHOT Profile status
-        const STAT_IDCHG2       = 0b01000000; // IDCHG2 PROCHOT Profile status
-        const STAT_ADPT_REMOVAL = 0b00100000; // Adapter removal PROCHOT Profile status
-        const STAT_BAT_REMOVAL  = 0b00010000; // Battery removal PROCHOT Profile status
-        const STAT_VSYS         = 0b00001000; // VSYS PROCHOT Profile status
-        const STAT_IDCHG1       = 0b00000100; // IDCHG1 PROCHOT Profile status
-        const STAT_INOM         = 0b00000010; // INOM PROCHOT Profile status
-        const STAT_ICRIT        = 0b00000001; // ICRIT PROCHOT Profile status
+    pub struct ProchotLsbFlags: u8 { // Corresponds to PROCHOT_STATUS_LSB (0x22 in firmware)
+            const STAT_VINDPM       = 1 << 7;
+            const STAT_COMP         = 1 << 6;
+            const STAT_ICRIT        = 1 << 5;
+            const STAT_INOM         = 1 << 4;
+            const STAT_IDCHG1       = 1 << 3;
+            const STAT_VSYS         = 1 << 2;
+            const STAT_BAT_REMOVAL  = 1 << 1;
+            const STAT_ADPT_REMOVAL = 1 << 0;
     }
 }
 
 bitflags! {
     #[derive(Serialize, Deserialize, Default)]
     #[serde(transparent)]
-    pub struct ProchotMsbFlags: u8 { // Corresponds to PROCHOT_STATUS_MSB (0x39)
-        const EN_PROCHOT_EXT  = 0b10000000; // PROCHOT Pulse Extension Enable
-        // Bits 6:5 for PROCHOT_WIDTH, handled separately
-        const PROCHOT_CLEAR   = 0b00010000; // PROCHOT Pulse Clear
-        const STAT_VAP_FAIL   = 0b00001000; // VAP failure status
-        const STAT_EXIT_VAP   = 0b00000100; // Exit VAP status
-        const STAT_VINDPM     = 0b00000010; // VINDPM PROCHOT Profile status
-        const STAT_COMP       = 0b00000001; // CMPOUT PROCHOT Profile status
+    pub struct ProchotMsbFlags: u8 { // Corresponds to PROCHOT_STATUS_MSB (0x23 in firmware)
+            const EN_PROCHOT_EXT  = 1 << 6;
+            // PROCHOT_WIDTH (bits 5:4 of original MSB) is handled as a separate field 'prochot_width'
+            const PROCHOT_CLEAR   = 1 << 3;
+            // Bit 2 is reserved in firmware
+            const STAT_VAP_FAIL   = 1 << 1;
+            const STAT_EXIT_VAP   = 1 << 0;
     }
 }
 
@@ -253,7 +253,7 @@ where
 {
     #[derive(Deserialize)]
     #[serde(field_identifier, rename_all = "lowercase")]
-    enum Field { Ts1, IsThermistor }
+    enum Field { Ts1, Ts2, Ts3, IsThermistor }
 
     struct TemperaturesVisitor;
 
@@ -269,35 +269,109 @@ where
             V: de::MapAccess<'de>,
         {
             let mut ts1 = None;
+            let mut ts2 = None; // Added
+            let mut ts3 = None; // Added
             let mut is_thermistor = None;
 
-            while let Some(key) = map.next_key()? {
-                match key {
-                    Field::Ts1 => {
+            while let Some(key_str) = map.next_key::<String>()? { // Deserialize key as String to handle Optionals
+                match key_str.as_str() {
+                    "ts1" => {
                         if ts1.is_some() {
                             return Err(de::Error::duplicate_field("ts1"));
                         }
                         ts1 = Some(map.next_value()?);
                     }
-                    Field::IsThermistor => {
+                    "ts2" => { // Added
+                        if ts2.is_some() {
+                            return Err(de::Error::duplicate_field("ts2"));
+                        }
+                        ts2 = Some(map.next_value()?);
+                    }
+                    "ts3" => { // Added
+                        if ts3.is_some() {
+                            return Err(de::Error::duplicate_field("ts3"));
+                        }
+                        ts3 = Some(map.next_value()?);
+                    }
+                    "is_thermistor" => {
                         if is_thermistor.is_some() {
                             return Err(de::Error::duplicate_field("is_thermistor"));
                         }
                         is_thermistor = Some(map.next_value()?);
+                    }
+                    _ => {
+                        // Ignore unknown fields
+                        let _ = map.next_value::<serde::de::IgnoredAny>()?;
                     }
                 }
             }
 
             let ts1 = ts1.ok_or_else(|| de::Error::missing_field("ts1"))?;
             let is_thermistor = is_thermistor.ok_or_else(|| de::Error::missing_field("is_thermistor"))?;
+            // ts2 and ts3 are optional, so they default to None if not present
 
-            Ok(Temperatures { ts1, is_thermistor })
+            Ok(Temperatures { ts1, ts2, ts3, is_thermistor })
         }
     }
 
     deserializer.deserialize_struct(
         "Temperatures",
-        &["ts1", "is_thermistor"],
+        &["ts1", "ts2", "ts3", "is_thermistor"], // Added ts2, ts3
         TemperaturesVisitor,
     )
+}
+// Payload structure for USB communication, mirroring device-side AllMeasurementsUsbPayload
+// This will be used by binrw to parse the raw USB byte stream.
+#[derive(Debug, Clone, Copy, binrw::BinRead, binrw::BinWrite)] // Added BinWrite
+#[brw(big)] // Default to Big Endian to match firmware's write_be
+pub struct HostSideUsbPayload {
+    // Fields from Bq25730Measurements -> AdcMeasurements
+    // These are raw u16 values as sent by firmware, matching names in device's AllMeasurementsUsbPayload
+    pub bq25730_adc_vbat_raw: u16,
+    pub bq25730_adc_vsys_raw: u16,
+    pub bq25730_adc_ichg_raw: u16,
+    pub bq25730_adc_idchg_raw: u16, // Note: firmware sends this as u16 (from u8 raw ADC)
+    pub bq25730_adc_iin_raw: u16,
+    // #[brw(big)] // No longer needed, inherits from struct default
+    pub bq25730_adc_psys_raw: u16,
+    pub bq25730_adc_vbus_raw: u16,
+    pub bq25730_adc_cmpin_raw: u16, // Note: firmware sends this as u16 (from u8 raw ADC)
+
+    // Fields from Bq76920Measurements -> Bq76920CoreMeasurements<5>
+    // #[brw(big)] // No longer needed
+    pub bq76920_cell1_mv: i32,
+    // #[brw(big)] // No longer needed
+    pub bq76920_cell2_mv: i32,
+    // #[brw(big)] // No longer needed
+    pub bq76920_cell3_mv: i32,
+    // #[brw(big)] // No longer needed
+    pub bq76920_cell4_mv: i32,
+    // #[brw(big)] // No longer needed
+    pub bq76920_cell5_mv: i32,
+    
+    pub bq76920_ts1_raw_adc: u16,
+    pub bq76920_ts2_present: u8,
+    pub bq76920_ts2_raw_adc: u16,
+    pub bq76920_ts3_present: u8,
+    pub bq76920_ts3_raw_adc: u16,
+    pub bq76920_is_thermistor: u8,
+    // #[brw(big)] // No longer needed
+    pub bq76920_current_ma: i32,
+    pub bq76920_system_status_bits: u8,
+    pub bq76920_mos_status_bits: u8,
+
+    // Fields from Ina226Measurements
+    // #[brw(big)] // No longer needed
+    pub ina226_voltage_f32: f32,
+    // #[brw(big)] // No longer needed
+    pub ina226_current_f32: f32,
+    // #[brw(big)] // No longer needed
+    pub ina226_power_f32: f32,
+
+    // Fields from Bq25730Alerts
+    pub bq25730_charger_status_raw_u16: u16,
+    pub bq25730_prochot_status_raw_u16: u16,
+
+    // Fields from Bq76920Alerts
+    pub bq76920_alerts_system_status_bits: u8,
 }

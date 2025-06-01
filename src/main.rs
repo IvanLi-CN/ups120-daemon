@@ -82,6 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(usb_event) = usb_event_rx.recv() => {
                 match usb_event {
                     UsbEvent::Measurements(measurements) => {
+                        info!("[LOG POINT 3] 准备发送到 MQTT 的数据: {:?}", measurements); // 添加日志
                         let topic = format!("{}/measurements", mqtt_topic_prefix);
                         if let Err(e) =
                             publish_measurements(&mqtt_client, &topic, measurements).await
