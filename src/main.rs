@@ -1,11 +1,16 @@
-use std::env;
-use std::time::Duration;
 use dotenv::dotenv;
 use env_logger::{Builder, Target};
 use log::{error, info};
+use std::env;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
-use ups120_daemon::{usb_types::*, usb_handlers::*, mqtt_handlers::*};
+// Ensure UsbEvent is imported correctly and data_models module is available
+use ups120_daemon::{
+    mqtt_handlers::*,
+    usb_handlers::*,
+    usb_types::{UsbCommand, UsbEvent}, // UsbEvent is defined in usb_types
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -25,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mqtt_password = env::var("MQTT_PASSWORD").ok();
     let mqtt_client_id =
         env::var("MQTT_CLIENT_ID").unwrap_or_else(|_| "ups120_cli_client".to_string());
-    let mqtt_topic_prefix = env::var("MQTT_TOPIC_PREFIX").unwrap_or_else(|_| "ups120".to_string()); // 移除下划线
+    let mqtt_topic_prefix = env::var("MQTT_TOPIC_PREFIX").unwrap_or_else(|_| "ups120".to_string());
 
     let usb_vid: u16 = u16::from_str_radix(
         env::var("USB_VID")
@@ -63,6 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 创建 MPSC 渠道
     let (usb_cmd_tx, usb_cmd_rx) = mpsc::channel::<UsbCommand>(32);
+    // UsbEvent itself is not generic. Its Measurements variant carries data_models::AllMeasurements<5>.
     let (usb_event_tx, mut usb_event_rx) = mpsc::channel::<UsbEvent>(32);
 
     // 启动 USB 管理任务
@@ -77,15 +83,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     error!("发送取消订阅命令到 USB 管理任务失败: {:?}", e);
                 }
                 info!("程序退出。");
-                break Ok(()); // 退出主循环并返回 Ok(())
+                break Ok(());
             }
             Some(usb_event) = usb_event_rx.recv() => {
                 match usb_event {
-                    UsbEvent::Measurements(measurements) => {
-                        info!("[LOG POINT 3] 准备发送到 MQTT 的数据: {:?}", measurements); // 添加日志
-                        let topic = format!("{}/measurements", mqtt_topic_prefix);
+                    // measurements_data is already of type data_models::AllMeasurements<5>
+                    UsbEvent::Measurements(measurements_data) => {
+                        info!("[LOG POINT 3] Received Processed Measurements: {:?}", measurements_data);
+
+                        // No further conversion needed here as measurements_data is already the correct type.
+                        // The conversion from HostSideUsbPayload to data_models::AllMeasurements<5>
+                        // is assumed to happen within usb_handlers.rs before sending the UsbEvent::Measurements.
+
+                        info!("[LOG POINT 3.5] Publishing Processed Measurements to MQTT: {:?}", measurements_data);
+                        let topic = format!("{}/measurements_all", mqtt_topic_prefix);
                         if let Err(e) =
-                            publish_measurements(&mqtt_client, &topic, measurements).await
+                            publish_measurements(&mqtt_client, &topic, measurements_data).await // Pass measurements_data directly
                         {
                             error!("MQTT 发布失败: {:?}, 5秒后重试...", e);
                             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -93,7 +106,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     UsbEvent::Error(e) => {
                         error!("USB 管理任务报告错误: {:?}, 尝试重新连接USB...", e);
-                        // 这里不需要 break，因为 usb_manager_task 会自动尝试重新连接
                     }
                 }
             }
@@ -106,6 +118,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     main_loop_result
 }
-
-
-
